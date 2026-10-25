@@ -44,26 +44,62 @@ def main():
         raise ValueError("StartingPreset.startingPossessions must contain keys and values.")
     keys = possession_keys.findall("li")
     values = possession_values.findall("li")
-    if len(keys) != len(entries) or len(values) != len(entries):
+    if not keys and not values:
+        for human in entries:
+            possession_keys.append(deepcopy(human))
+            value = ET.Element("li")
+            ET.SubElement(value, "possessions")
+            possession_values.append(value)
+        keys = possession_keys.findall("li")
+        values = possession_values.findall("li")
+    elif len(keys) != len(values):
         raise ValueError(
-            "The startingPossessions keys and values must match the human count."
+            "The source startingPossessions data is incomplete: "
+            f"{len(keys)} keys but {len(values)} values."
         )
 
-    template_key = keys[0]
-    template_value = values[0]
-    if [node.text for node in template.iter("id")] != [
-        node.text for node in template_key.iter("id")
-    ]:
-        raise ValueError(
-            "The first startingPossessions key does not mirror the first human entry."
-        )
+    key_indices = {}
+    for index, key in enumerate(keys):
+        key_id = key.findtext("id")
+        if key_id:
+            if key_id in key_indices:
+                raise ValueError(
+                    f"Duplicate startingPossessions key for human ID {key_id}."
+                )
+            key_indices[key_id] = index
+
+    templates = []
+    for human in entries:
+        human_id = human.findtext("id")
+        if not human_id or human_id not in key_indices:
+            raise ValueError(
+                f"No startingPossessions key matches human ID {human_id!r}."
+            )
+        index = key_indices[human_id]
+        key = keys[index]
+        human_ids = [node.text for node in human.iter("id")]
+        key_ids = [node.text for node in key.iter("id")]
+        human_load_ids = [node.text for node in human.iter("loadID")]
+        key_load_ids = [node.text for node in key.iter("loadID")]
+        if human_ids != key_ids or human_load_ids != key_load_ids:
+            raise ValueError(
+                "The startingPossessions key does not mirror its human entry "
+                f"for human ID {human_id}."
+            )
+        templates.append((human, key, values[index]))
 
     used_ids = {
         node.text for node in root.iter("id") if node.text is not None
     }
-    template_ids = [node.text for node in template.iter("id") if node.text]
-    if len(template_ids) != len(set(template_ids)):
-        raise ValueError("The first human entry contains duplicate IDs.")
+    for human, _, value in templates:
+        template_ids = [
+            node.text for record in (human, value) for node in record.iter("id")
+            if node.text
+        ]
+        if len(template_ids) != len(set(template_ids)):
+            raise ValueError(
+                f"Human {human.findtext('id')} and its possessions contain duplicate IDs."
+            )
 
     numeric_id_suffixes = [
         int(match.group(1))
@@ -80,13 +116,24 @@ def main():
     ]
     next_load_id = max(numeric_load_ids, default=0) + 1
 
+    template_index = 0
     while len(entries) < TARGET_COUNT:
+        template, template_key, template_value = templates[
+            template_index % len(templates)
+        ]
+        template_index += 1
         clone = deepcopy(template)
         clone_key = deepcopy(template_key)
         clone_value = deepcopy(template_value)
-        cloned_ids = [node.text for node in clone.iter("id") if node.text]
+        cloned_ids = [
+            node.text
+            for record in (clone, clone_value)
+            for node in record.iter("id")
+            if node.text
+        ]
         key_ids = [node.text for node in clone_key.iter("id") if node.text]
-        if cloned_ids != key_ids:
+        human_ids = [node.text for node in clone.iter("id") if node.text]
+        if human_ids != key_ids:
             raise ValueError("The cloned startingPossessions key does not mirror its human.")
 
         id_mapping = {}
@@ -105,7 +152,7 @@ def main():
         id_pattern = re.compile(
             "|".join(re.escape(value) for value in sorted(id_mapping, key=len, reverse=True))
         )
-        for record in (clone, clone_key):
+        for record in (clone, clone_key, clone_value):
             for node in record.iter():
                 if node.text and id_pattern.pattern:
                     node.text = id_pattern.sub(
@@ -114,7 +161,7 @@ def main():
 
         cloned_numeric_load_ids = {
             node.text
-            for record in (clone, clone_key)
+            for record in (clone, clone_value)
             for node in record.iter("loadID")
             if node.text and node.text.isdecimal()
         }
@@ -126,7 +173,7 @@ def main():
             used_load_ids.add(str(next_load_id))
             next_load_id += 1
 
-        for record in (clone, clone_key):
+        for record in (clone, clone_key, clone_value):
             for load_id in record.iter("loadID"):
                 if load_id.text in load_id_mapping:
                     load_id.text = load_id_mapping[load_id.text]
@@ -164,12 +211,29 @@ def main():
     if taking_count is None:
         raise ValueError("The source XML does not contain StartingPreset.takingCount.")
     taking_count.text = str(TARGET_COUNT)
-    if len(keys) != TARGET_COUNT or len(values) != TARGET_COUNT:
-        raise ValueError("The output startingPossessions entries do not match the human count.")
+    if len(keys) != len(values):
+        raise ValueError(
+            "The output startingPossessions data has mismatched key and value counts."
+        )
 
     entity_ids = []
     pawn_load_ids = []
-    for human, key in zip(entries, keys):
+    for human in entries:
+        human_id = human.findtext("id")
+        key_index = next(
+            (
+                index
+                for index, key in enumerate(keys)
+                if key.findtext("id") == human_id
+            ),
+            None,
+        )
+        if key_index is None:
+            raise ValueError(
+                f"No startingPossessions key matches human ID {human_id}."
+            )
+        key = keys[key_index]
+        value = values[key_index]
         human_entity_ids = [node.text for node in human.iter("id") if node.text]
         key_entity_ids = [node.text for node in key.iter("id") if node.text]
         if human_entity_ids != key_entity_ids:
@@ -180,6 +244,12 @@ def main():
         if human_load_ids != key_load_ids:
             raise ValueError("A startingPossessions key has mismatched loadIDs.")
         pawn_load_ids.extend(human_load_ids)
+        entity_ids.extend(
+            node.text for node in value.iter("id") if node.text
+        )
+        pawn_load_ids.extend(
+            node.text for node in value.iter("loadID") if node.text
+        )
 
     if len(entity_ids) != len(set(entity_ids)):
         raise ValueError("The output contains duplicate entity IDs across human entries.")
